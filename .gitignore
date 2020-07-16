@@ -1,3 +1,6 @@
+# Executables
+*.out
+
 # Compiled object files
 *.o
 *.swp
