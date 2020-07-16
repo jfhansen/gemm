@@ -1,0 +1,6 @@
+# Compiled object files
+*.o
+*.swp
+
+# VSCode created folders
+.*/

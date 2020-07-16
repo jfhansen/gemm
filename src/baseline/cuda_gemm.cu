@@ -53,11 +53,12 @@ void count_zero_elems(const float *C, size_t N, float *nzelem)
 	// Block loads elements into shared memory
 	extern __shared__ float y[];
 	// If element is zero write 1 in y array
+	// Each block takes care of 1 column of input array
 	for (size_t row = tid; row < N; row+=stride)
 		y[row] = (C[row*N+bid] == 0) ? 1.0 : 0.0;
 	__syncthreads();
 	
-	// Build summation tree
+	// Build summation tree. Find amount of zero elements in each column
 	for (int s=N/2; s>0; s=s/2)
 	{
 		for (size_t row = tid; row < s; row+=stride)
@@ -79,7 +80,6 @@ float verify_result(const float *A, const float *B, float *C, size_t N)
 	unsigned count_v = 0;
 	unsigned count_c = 0;
 	float average_error = 0;
-	std::cout << "Reached verify_result." << std::endl;
 	float max_error = 0;
 	for (size_t i = 0; i < N; i++)
 	{
@@ -153,11 +153,12 @@ int main() {
 	// Compute number of threads per block and number of blocks
 	unsigned blockSize = 256;
 	unsigned numBlocks = N;
-	
+	// Verify that kernel works.
 	count_zero_elems<<<numBlocks, blockSize, N>>>(d_c,N,d_nzelem);
 	cudaDeviceSynchronize();
 
 	cudaMemcpy(h_nzelem, d_nzelem, sizeof(float), cudaMemcpyDeviceToHost);
+	// Should be N*N
 	std::cout << "Number of zero elements in C before: " << *h_nzelem << std::endl;
 	*h_nzelem = 0;
 
@@ -168,10 +169,12 @@ int main() {
 	// Wait for GPU to finish
 	cudaDeviceSynchronize();
 	
+	// Count number of zero elements in C matrix after GeMM
 	count_zero_elems<<<numBlocks, blockSize, N>>>(d_c,N,d_nzelem);
 	cudaDeviceSynchronize();
 	
 	cudaMemcpy(h_nzelem, d_nzelem, sizeof(float), cudaMemcpyDeviceToHost);
+	// Should be 0
 	std::cout << "Number of zero elements in C after: " << *h_nzelem << std::endl;
 	
 	cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
