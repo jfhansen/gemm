@@ -40,7 +40,7 @@ void cuda_gemm(const float *A, const float *B, float *C, size_t N)
 	for (size_t row = tid; row < N; row+=stride)
 		for (size_t j = 0; j < N; j++)
 			C[row*N+col] += A[row*N+j] * x[j];
-	__syncthreads();
+	//__syncthreads();
 }
 
 __global__
@@ -63,16 +63,13 @@ void count_zero_elems(const float *C, size_t N, float *nzelem)
 	{
 		for (size_t row = tid; row < s; row+=stride)
 		{
-			if (row < s)
-				y[row] += y[row+s];
-			__syncthreads();
+			y[row] += y[row+s];
 		}
 	}
+	__syncthreads();
 	// Thread 0 in every block holds amount of zero elements in one column.
 	if (tid == 0)
 		atomicAdd(nzelem, y[tid]);
-	
-	__syncthreads();
 }
 
 float verify_result(const float *A, const float *B, float *C, size_t N)
@@ -94,7 +91,7 @@ float verify_result(const float *A, const float *B, float *C, size_t N)
 				count_v++;
 			if (C[i*N+j] == 0)
 				count_c++;
-			average_error += (tmp - C[i*N+j]);
+			average_error += fabs(tmp - C[i*N+j]);
 			max_error = fmax(max_error, tmp - C[i*N+j]);
 			//assert(tmp == C[i*N+j]);
 		}
@@ -107,7 +104,7 @@ float verify_result(const float *A, const float *B, float *C, size_t N)
 }
 
 int main() {
-	int N = (1<<7);
+	int N = (1<<6);
 	//int N = 10;
 	uint32_t bytes = N*N*sizeof(float);	
 
@@ -132,8 +129,8 @@ int main() {
 
 	// Fill A and B matrices with random values
 	// Initialize C as zero-only matrix
-	std::generate(h_a, h_a+N*N, [&] { return 1.0; });//dist(rng); });
-	std::generate(h_b, h_b+N*N, [&] { return 1.0; });//dist(rng); });
+	std::generate(h_a, h_a+N*N, [&] { return dist(rng); });
+	std::generate(h_b, h_b+N*N, [&] { return dist(rng); });
 	std::generate(h_c, h_c+N*N, [&] { return 0.0; });
 
 	// Allocate device memory
@@ -178,12 +175,7 @@ int main() {
 	std::cout << "Number of zero elements in C after: " << *h_nzelem << std::endl;
 	
 	cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
-	//std::cout << "Result Matrix: " << std::endl;
-	//for (int i = 0; i < N; i++) {
-	//	for (int j = 0; j < N; j++)
-	//		std::cout << h_c[i*N+j] << " ";
-	//	std::cout << std::endl;
-	//}
+
 	// Verify result
 	float maxError;
 	maxError =	verify_result(h_a,h_b,h_c,N);
