@@ -1,5 +1,5 @@
 /************************************
- * Baseline CUDA integer GeMM implementation
+ * Baseline CUDA GeMM implementation
  * Author: jfhansen
  * Last modified: 15/07/2020
  ***********************************/
@@ -13,54 +13,56 @@
 
 #define BLOCKSIZE 256
 
+const int N = (1<<10);
+const int SHMEM_SIZE = (1<<10);
+
 // Kernel function that computes GeMM on CUDA threads
 __global__
-void cuda_gemm(const int *A, const int *B, int *C, size_t N)
+void cuda_gemm(const float *A, const float *B, float *C, size_t N)
 {
-	// Block index in grid
+	// Compute which column thread will handle
 	const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
-	// Thread index in block
+	// Compute which row thread will handle
 	const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
 
 	// Perform GeMM
 	for (size_t j = 0; j < N; j++)
 		C[row*N+col] += A[row*N+j] * B[j*N+col];
+	__syncthreads();
 }
 
 __global__
-void count_zero_elems(const int *C, size_t N, int *nzelem)
+void count_zero_elems(const float *C, size_t N, float *nzelem)
 {
 	unsigned int stride = blockDim.x;
 	unsigned int tid = threadIdx.x;
 	unsigned int bid = blockIdx.x;
 	unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	// Block loads elements into shared memory
-	extern __shared__ int y[];
+	__shared__ float y[SHMEM_SIZE];
 	// If element is zero write 1 in y array
-	// Each block takes care of 1 column of input array
-	for (size_t row = tid; row < N; row+=stride)
-		y[row] = (C[row*N+bid] == 0) ? 1 : 0;
+	// Each block takes care of 1 row of input array
+	for (size_t col = tid; col < N; col+=stride)
+		y[col] = (C[bid*N+col] == 0) ? 1.0 : 0.0;
 	__syncthreads();
 	
 	// Build summation tree. Find amount of zero elements in each column
 	for (int s=N/2; s>0; s=s/2)
 	{
-		for (size_t row = tid; row < s; row+=stride)
+		for (size_t col = tid; col < s; col+=stride)
 		{
-			//if (row < s)
-			y[row] += y[row+s];
-			//__syncthreads();
+			y[col] += y[col+s];
 		}
+		__syncthreads();
 	}
-	__syncthreads();
-	// Thread 0 in every block holds amount of zero elements in one column.
+	// Thread 0 in every block holds amount of zero elements in one row.
 	if (tid == 0)
 		atomicAdd(nzelem, y[tid]);
 	
 	__syncthreads();
 }
 
-float verify_result(const int *A, const int *B, int *C, size_t N)
+float verify_result(const float *A, const float *B, float *C, size_t N)
 {
 	unsigned count_v = 0;
 	unsigned count_c = 0;
@@ -92,18 +94,16 @@ float verify_result(const int *A, const int *B, int *C, size_t N)
 }
 
 int main() {
-	int N = (1<<10);
-	//int N = 10;
-	uint32_t bytes = N*N*sizeof(int);	
+	uint32_t bytes = N*N*sizeof(float);	
 
 	// Allocate memory in host.
-	int *h_a, *h_b, *h_c;
-	int *h_nzelems;
-	h_a = new int[N*N];
-	h_b = new int[N*N];
-	h_c = new int[N*N];
-	h_nzelems = new int;
-	*h_nzelems = 0;
+	float *h_a, *h_b, *h_c;
+	float *h_nzelem;
+	h_a = new float[N*N];
+	h_b = new float[N*N];
+	h_c = new float[N*N];
+	h_nzelem = new float;
+	*h_nzelem = 0;
 	
 	// Allocate unified memory
 	//cudaMallocManaged(&a, N*N*sizeof(float));
@@ -113,7 +113,7 @@ int main() {
 	// Generate values from uniform distribution
 	std::mt19937 rng;
 	rng.seed(std::random_device()());
-	std::uniform_int_distribution<int> dist(-10,10);
+	std::uniform_real_distribution<float> dist(-10,10);
 
 	// Fill A and B matrices with random values
 	// Initialize C as zero-only matrix
@@ -122,19 +122,33 @@ int main() {
 	std::generate(h_c, h_c+N*N, [&] { return 0.0; });
 
 	// Allocate device memory
-	int *d_a, *d_b, *d_c;
-	int *d_nzelems;
+	float *d_a, *d_b, *d_c;
+	float *d_nzelem;
 	cudaMalloc(&d_a, bytes);
 	cudaMalloc(&d_b, bytes);
 	cudaMalloc(&d_c, bytes);
-	cudaMalloc(&d_nzelems, sizeof(int));
+	cudaMalloc(&d_nzelem, sizeof(float));
 	
 	// Copy data to device
 	cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
 	cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice);
 	cudaMemcpy(d_c, h_c, bytes, cudaMemcpyHostToDevice);
-	cudaMemcpy(d_nzelems, h_nzelems, sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_nzelem, h_nzelem, sizeof(float), cudaMemcpyHostToDevice);
+	
+	// Compute number of threads per block and number of blocks
+	unsigned blockSize = BLOCKSIZE;
+	unsigned numBlocks = N;
+	// Verify that kernel works.
+	count_zero_elems<<<numBlocks, blockSize>>>(d_c,N,d_nzelem);
+	cudaDeviceSynchronize();
 
+	cudaMemcpy(h_nzelem, d_nzelem, sizeof(float), cudaMemcpyDeviceToHost);
+	// Should be N*N
+	std::cout << "Number of zero elements in C before: " << *h_nzelem << std::endl;
+	*h_nzelem = 0;
+
+	cudaMemcpy(d_nzelem, h_nzelem, sizeof(float), cudaMemcpyHostToDevice);
+	
 	// Compute block size and number of blocks for GeMM
 	unsigned THREADS = sqrt(BLOCKSIZE);
 	unsigned BLOCKS = N/THREADS;
@@ -145,16 +159,15 @@ int main() {
 	// Wait for GPU to finish
 	cudaDeviceSynchronize();
 	
-	//cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
-
-	//unsigned blockSize = BLOCKSIZE;
-	//unsigned numBlocks = N;
-	//count_zero_elems<<<numBlocks, blockSize, N>>>(d_c, N, d_nzelems);
-	//cudaDeviceSynchronize();
-
-	//cudaMemcpy(h_nzelems, d_nzelems, sizeof(int), cudaMemcpyDeviceToHost);
-	//std::cout << "Number of Zero elements in C: " << *h_nzelems << std::endl;
-
+	// Count number of zero elements in C matrix after GeMM
+	count_zero_elems<<<numBlocks, blockSize>>>(d_c,N,d_nzelem);
+	cudaDeviceSynchronize();
+	
+	cudaMemcpy(h_nzelem, d_nzelem, sizeof(float), cudaMemcpyDeviceToHost);
+	// Should be 0
+	std::cout << "Number of zero elements in C after: " << *h_nzelem << std::endl;
+	
+	cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
 	// Verify result
 	float maxError;
 	maxError =	verify_result(h_a,h_b,h_c,N);
@@ -168,5 +181,10 @@ int main() {
 	delete [] h_b;
 	delete [] h_c;
 	
+	// Check for errors
+	cudaError_t err;
+	while ( (err = cudaGetLastError()) != cudaSuccess)
+		std::cout << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+	//cudaProfilerStop();
 	return 0;
 }

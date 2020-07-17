@@ -11,7 +11,10 @@
 #include <random>
 #include <math.h>
 
-#define BLOCKSIZE 256
+#define BLOCKSIZE 64
+
+const int N = (1<<10);
+const int SHMEM_SIZE = (1<<10);
 
 // Kernel function that computes GeMM on CUDA threads
 __global__
@@ -30,16 +33,19 @@ void cuda_gemm(const float *A, const float *B, float *C, size_t N)
 	// Thereby a column of the B matrix can be brought into shared memory.
 	// Since matrices are stored row-by-row, this saves a lot of time dealing
 	// with cache misses.
-	extern __shared__ float x[];
+	__shared__ float s_a[SHMEM_SIZE];
+	__shared__ float s_b[SHMEM_SIZE];
 	// Every thread in block fetches one element in column 'bid'.
-	for (size_t row = tid; row < N; row+=stride)
-		x[row] = B[row*N+col];
+	for (size_t idx = tid; idx < N; idx+=stride) {
+		s_a[idx] = A[blockIdx.x*N+idx];
+		s_b[idx] = B[idx*N+col];
+	}
 	__syncthreads();
 	
 	// Perform GeMM
 	for (size_t row = tid; row < N; row+=stride)
 		for (size_t j = 0; j < N; j++)
-			C[row*N+col] += A[row*N+j] * x[j];
+			C[row*N+col] += s_a[j] * s_b[j];
 	//__syncthreads();
 }
 
@@ -51,7 +57,7 @@ void count_zero_elems(const float *C, size_t N, float *nzelem)
 	unsigned int bid = blockIdx.x;
 	unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	// Block loads elements into shared memory
-	extern __shared__ float y[];
+	__shared__ float y[SHMEM_SIZE];
 	// If element is zero write 1 in y array
 	// Each block takes care of 1 column of input array
 	for (size_t row = tid; row < N; row+=stride)
@@ -65,8 +71,8 @@ void count_zero_elems(const float *C, size_t N, float *nzelem)
 		{
 			y[row] += y[row+s];
 		}
+		__syncthreads();
 	}
-	__syncthreads();
 	// Thread 0 in every block holds amount of zero elements in one column.
 	if (tid == 0)
 		atomicAdd(nzelem, y[tid]);
@@ -104,8 +110,6 @@ float verify_result(const float *A, const float *B, float *C, size_t N)
 }
 
 int main() {
-	int N = (1<<6);
-	//int N = 10;
 	uint32_t bytes = N*N*sizeof(float);	
 
 	// Allocate memory in host.
@@ -148,10 +152,10 @@ int main() {
 	cudaMemcpy(d_nzelem, h_nzelem, sizeof(float), cudaMemcpyHostToDevice);
 	
 	// Compute number of threads per block and number of blocks
-	unsigned blockSize = 256;
+	unsigned blockSize = BLOCKSIZE;
 	unsigned numBlocks = N;
 	// Verify that kernel works.
-	count_zero_elems<<<numBlocks, blockSize, N>>>(d_c,N,d_nzelem);
+	count_zero_elems<<<numBlocks, blockSize>>>(d_c,N,d_nzelem);
 	cudaDeviceSynchronize();
 
 	cudaMemcpy(h_nzelem, d_nzelem, sizeof(float), cudaMemcpyDeviceToHost);
@@ -162,12 +166,12 @@ int main() {
 	cudaMemcpy(d_nzelem, h_nzelem, sizeof(float), cudaMemcpyHostToDevice);
 	
 	// Run GeMM kernel on GPU
-	cuda_gemm<<<numBlocks, blockSize, N>>>(d_a,d_b,d_c,N);
+	cuda_gemm<<<numBlocks, blockSize>>>(d_a,d_b,d_c,N);
 	// Wait for GPU to finish
 	cudaDeviceSynchronize();
 	
 	// Count number of zero elements in C matrix after GeMM
-	count_zero_elems<<<numBlocks, blockSize, N>>>(d_c,N,d_nzelem);
+	count_zero_elems<<<numBlocks, blockSize>>>(d_c,N,d_nzelem);
 	cudaDeviceSynchronize();
 	
 	cudaMemcpy(h_nzelem, d_nzelem, sizeof(float), cudaMemcpyDeviceToHost);
